@@ -1,4 +1,8 @@
 from __future__ import print_function, annotations
+
+import datetime
+import time
+
 import matplotlib.pyplot as plt
 from typing import Literal
 import numpy as np
@@ -12,9 +16,9 @@ from dataclasses import dataclass
 import pandas as pd
 # from inpainting_scripts_2024.demo_total_chain_inpainting_v4 import human_sorted
 from keyboard import KeyboardEvent
-
 from assets.coco_names import *
 from runnable.scripts.try_ffmpeg_to_get_only_borders_or_blur_frames import concat_vertical_videos
+
 
 # from path_config import PATHS
 
@@ -24,8 +28,6 @@ and PR_FG into FG, but this would be invisible on img_painted, it would only be 
 then the user strokes would apply on top of it.
 
 """
-
-project_root_fast_label = Path(__file__).parent.parent
 
 def debug_plot_nparray(img):
     plt.imshow(img)
@@ -106,12 +108,14 @@ class GrabCut:
     def __init__(self, input_dir: Path, output_dir: Path, init_grabcut_with: Literal["rect", "mask"],
                  initial_mask_dir: Path = None, cmap: Literal["VIRI", "VIRI2", "AFMHOT", "HOT"] = 'VIRI',
                  recursive_img_search=False, downsize: float = False, debug=False, save_in_original_shape=True,
-                 vertical_guide_lines=True, blank_out_middle_third=True, begin_at_frame=0, nb_preview_next_frames=0):
+                 vertical_guide_lines=True, blank_out_middle_third=True, begin_at_frame=0, nb_preview_next_frames=10,
+                 default_2bitmodifier = -170):
         # je peux clairement faire un autre objet avec les states des images, dont tous les buffers machin
         # genre states_this_img
         self.all_corrected_masks = None
         self.cmap = cmap
         self.blank_out_middle_third = blank_out_middle_third
+        self.annotation_time_per_frame = []
         # self.apply_cmap =
         self.next_frames = []
         self.guide_lines = vertical_guide_lines
@@ -119,15 +123,19 @@ class GrabCut:
         self.states = StatesGrabCut()
         self.color_cst = ColorConstants()
         self.input_dir = input_dir
+        self.default_2bitmodifier, self.this_img_2bitmodifier = [default_2bitmodifier] * 2
         self.output_dir = output_dir
         self.i_img_in_folder = begin_at_frame
         self.label = "unknown"
         self.label_id = 1
         self.building_csv = []
-        self.nb_next_frames = nb_preview_next_frames
+        self.nb_next_frames_to_preview = nb_preview_next_frames
         self.init_grabcut_with = init_grabcut_with
         self.initial_mask_dir = initial_mask_dir
         self.downsize = downsize
+        # self.time_log_file = Path(output_dir) / f'time_log_{int(time.time())}.txt'
+        self.time_log_file = Path(output_dir / "fichier_concatené_v1.csv")
+        self.lightness_of_this_img = 0
 
         self.all_img_paths = search_for_images(input_dir, recursive=recursive_img_search)
 
@@ -137,10 +145,11 @@ class GrabCut:
 
         self.rect = (0, 0, 1, 1)
         self.nth_elmt_in_img = 1
-        self.img_original, self.img_name, self.img_original_shape, self.new_hw = self.init_image(self.all_img_paths, i_img=self.i_img_in_folder, downsize=self.downsize)
-        if self.nb_next_frames > 0:
-            self.next_frames = GrabCut.get_all_next_frames(self.all_img_paths, self.i_img_in_folder, self.nb_next_frames,
-                                                           new_h=self.new_hw[0]//self.nb_next_frames, new_w=self.new_hw[1]//self.nb_next_frames)
+        self.img_original, self.img_name, self.img_original_shape, self.new_hw = GrabCut.init_image(self.all_img_paths, i_img=self.i_img_in_folder, downsize=self.downsize)
+        self.timestamp_old = time.time()
+        if self.nb_next_frames_to_preview > 0:
+            self.next_frames = GrabCut.get_all_next_frames(self.all_img_paths, self.i_img_in_folder, self.nb_next_frames_to_preview,
+                                                           new_h=self.new_hw[0]*2//self.nb_next_frames_to_preview, new_w=self.new_hw[1] * 2 // self.nb_next_frames_to_preview)
         if save_in_original_shape:
             self.save_shape = self.img_original_shape[:2]
         else:
@@ -163,7 +172,7 @@ class GrabCut:
         #     self.BG
 
     @staticmethod
-    def load_thumbnail(all_image_path: [Path], i: int, new_h: int, new_w: int, verbose=True):
+    def load_thumbnail(all_image_path: [Path], i: int, new_h: int, new_w: int, verbose=False):
         if verbose:
             print(all_image_path)
             print(i, new_h, new_w)
@@ -178,7 +187,7 @@ class GrabCut:
     def get_all_next_frames(all_img: [Path], actual_i_img: int, nb_next_frames: int, new_h: int, new_w: int):
 
         with ThreadPoolExecutor(max_workers=min(nb_next_frames, 8)) as executor:
-            images = list(executor.map(GrabCut.load_thumbnail, all_img*nb_next_frames, range(actual_i_img+1,
+            images = list(executor.map(GrabCut.load_thumbnail, [all_img]*nb_next_frames, range(actual_i_img+1,
                                                                               actual_i_img+nb_next_frames+1),
                                        [new_h]*nb_next_frames, [new_w]*nb_next_frames))
 
@@ -209,7 +218,7 @@ class GrabCut:
 
     @staticmethod
     def initial_mask_as_grabmask(color_cst: ColorConstants, all_masks_path: [Path], i_img_in_folder: int,
-                                 new_h: int = None, new_w: int = None):
+                                 new_h: int = None, new_w: int = None, modifier=0):
         """
         >>> color_cst = ColorConstants()
         >>> all_initial_masks = search_for_images(project_root_fast_label / 'demo_data' / 'initial_masks', recursive=True)
@@ -220,14 +229,37 @@ class GrabCut:
         >>> grabmask = GrabCut.initial_mask_as_grabmask(color_cst, all_masks_path, 0, downsize=True)
         >>> _ = plt.imshow(grabmask); _ = plt.show()
         """
-        grabmask_human = cv2.imread(str(all_masks_path[i_img_in_folder]), cv2.IMREAD_GRAYSCALE)
-        if new_h or new_w: grabmask_human = cv2.resize(grabmask_human, (new_w, new_h))
-        assert grabmask_human is not None, f'Could not read {all_masks_path[i_img_in_folder]}'
-        grabmask_human[(0 < grabmask_human) & (grabmask_human <= 127)] = color_cst.ALL_PENS["PR_BG"]["val"]
-        grabmask_human[(128 <= grabmask_human) & (grabmask_human < 230)] = color_cst.ALL_PENS["PR_FG"]["val"]
-        grabmask_human[grabmask_human == 0] = color_cst.ALL_PENS["BG"]["val"]
-        grabmask_human[230 <= grabmask_human] = color_cst.ALL_PENS["FG"]["val"]
+        img_path = all_masks_path[i_img_in_folder]
+        grabmask_human = GrabCut.initial_mask_as_grabmask_from_img_path(color_cst, img_path, new_h, new_w,
+                                                                        modifier=modifier)
         return grabmask_human
+
+    @staticmethod
+    def initial_mask_as_grabmask_from_img_path(color_cst: ColorConstants, img_path: Path,
+                                                  new_h: int = None, new_w: int = None, modifier=0):
+        grabmask_human = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+        assert grabmask_human is not None, f'Could not read {img_path}'
+        if new_h or new_w: grabmask_human = cv2.resize(grabmask_human, (new_w, new_h))
+        pens = color_cst.ALL_PENS
+        grabmask_human = GrabCut.mask8bit_to_grabmask(grabmask_human, BG=pens["BG"]["val"], FG=pens["FG"]["val"],
+                                                     PR_BG=pens["PR_BG"]["val"], PR_FG=pens["PR_FG"]["val"],
+                                                      modifier=modifier)
+        return grabmask_human
+
+    @staticmethod
+    def mask8bit_to_grabmask(mask: np.ndarray, verbose=False, BG=0, FG=1, PR_BG=2, PR_FG=3, modifier=0):
+        """mask8bit is 8bit 1 channel image, from 0 to 255
+        grabmask is 4 values (0, 1, 2, 3)"""
+        default_low_thresh = 128
+        default_high_thresh = 230
+        low_thresh = min(max(default_low_thresh+modifier, 1), 255)
+        high_thresh = min(max(default_high_thresh+modifier, 1), 255)
+
+        mask[(0 < mask) & (mask < low_thresh)] = PR_BG
+        mask[(low_thresh <= mask) & (mask < high_thresh)] = PR_FG
+        mask[mask == 0] = BG
+        mask[high_thresh <= mask] = FG
+        return mask
 
     @staticmethod
     def grabmask_to_displaymask(mask: np.ndarray, verbose=False):
@@ -235,6 +267,17 @@ class GrabCut:
         mask_display = np.where((mask == 1) + (mask == 3), 255, 0).astype('uint8')
         if verbose: print("grabmask_to_displaymask", mask_display.shape, np.unique(mask_display))
         return mask_display
+
+    @staticmethod
+    def grabmask_to_rgbgrabmask(grabmask: np.ndarray, BG_bgr, FG_bgr, PR_BG_bgr, PR_FG_bgr) -> np.ndarray:
+        is_one_channel_img = (grabmask.ndim == 2) or (grabmask.ndim == 3 and grabmask.shape[-1] == 1)
+        assert is_one_channel_img
+        grabmask_human = np.stack((grabmask,) * 3, axis=-1)
+        grabmask_human[np.all(grabmask_human == [0, 0, 0], axis=-1)] = BG_bgr
+        grabmask_human[np.all(grabmask_human == [1, 1, 1], axis=-1)] = FG_bgr
+        grabmask_human[np.all(grabmask_human == [2, 2, 2], axis=-1)] = PR_BG_bgr
+        grabmask_human[np.all(grabmask_human == [3, 3, 3], axis=-1)] = PR_FG_bgr
+        return grabmask_human
 
     @staticmethod
     def init_image(all_img_paths: list[Path], i_img: int, downsize: float = False) -> (np.ndarray, str):
@@ -371,22 +414,22 @@ class GrabCut:
         savemask += (256 - nth_in_img) * (np.where((grabmask == 1) + (grabmask == 3), 1, 0).astype('uint8'))
         return savemask
 
-    def iterate_grabcut(self, verbose=True):
+    def iterate_grabcut(self, verbose=False):
         """This modifies inplace img, grabmask and output
         It was to emph on this, that I called them _ptr"""
 
-        print(""" For finer touchups, mark foreground and background after pressing keys 0-3
-        and again press 'n' \n""")
         bgdmodel = np.zeros((1, 65), np.float64)
         fgdmodel = np.zeros((1, 65), np.float64)
 
         if self.init_grabcut_with == "rect" and not self.states.rectangle_done_and_accounted:  # grabcut with rect
-            print("[GRABCUT WITH RECT]")
+            print("[GRABCUT WITH RECT] For finer touchups, mark foreground and background after pressing keys 0-3"
+                  " and again press 'n' \n")
             if np.any(self.grabmask):
                 cv2.grabCut(self.img_original, self.grabmask, self.rect, bgdmodel, fgdmodel, 1, cv2.GC_INIT_WITH_RECT)
             self.states.rectangle_done_and_accounted = True
         elif self.init_grabcut_with == "mask" or self.states.rectangle_done_and_accounted:  # grabcut with mask
-            print("[GRABCUT WITH MASK]")
+            print("[GRABCUT WITH MASK] For finer touchups, mark foreground and background after pressing keys 0-3"
+                  " and again press 'n' \n")
             if np.any(self.grabmask):
                 cv2.grabCut(self.img_original, self.grabmask, self.rect, bgdmodel, fgdmodel, 1, cv2.GC_INIT_WITH_MASK)
         else:
@@ -492,11 +535,15 @@ class GrabCut:
         mask_display = GrabCut.grabmask_to_displaymask(grabmask)
         if verbose: print("[compute_display_img] displaymask", mask_display.shape, np.unique(mask_display))
 
-        grabmask_human = np.stack((grabmask,) * 3, axis=-1)
-        grabmask_human[np.all(grabmask_human == [0, 0, 0], axis=-1)] = color_cst.ALL_PENS["BG"]["color_bgr"]
-        grabmask_human[np.all(grabmask_human == [1, 1, 1], axis=-1)] = color_cst.ALL_PENS["FG"]["color_bgr"]
-        grabmask_human[np.all(grabmask_human == [2, 2, 2], axis=-1)] = color_cst.ALL_PENS["PR_BG"]["color_bgr"]
-        grabmask_human[np.all(grabmask_human == [3, 3, 3], axis=-1)] = color_cst.ALL_PENS["PR_FG"]["color_bgr"]
+        grabmask_human = GrabCut.grabmask_to_rgbgrabmask(grabmask, BG_bgr=color_cst.ALL_PENS["BG"]["color_bgr"],
+                                                        FG_bgr=color_cst.ALL_PENS["FG"]["color_bgr"],
+                                                        PR_BG_bgr=color_cst.ALL_PENS["PR_BG"]["color_bgr"],
+                                                        PR_FG_bgr=color_cst.ALL_PENS["PR_FG"]["color_bgr"])
+        # grabmask_human = np.stack((grabmask,) * 3, axis=-1)
+        # grabmask_human[np.all(grabmask_human == [0, 0, 0], axis=-1)] = color_cst.ALL_PENS["BG"]["color_bgr"]
+        # grabmask_human[np.all(grabmask_human == [1, 1, 1], axis=-1)] = color_cst.ALL_PENS["FG"]["color_bgr"]
+        # grabmask_human[np.all(grabmask_human == [2, 2, 2], axis=-1)] = color_cst.ALL_PENS["PR_BG"]["color_bgr"]
+        # grabmask_human[np.all(grabmask_human == [3, 3, 3], axis=-1)] = color_cst.ALL_PENS["PR_FG"]["color_bgr"]
         mask_display_tripliquated = np.stack((mask_display,) * 3, axis=-1)
         if guide_lines:
             mask_display_tripliquated = GrabCut.add_vertical_lines_at_thirds(mask_display_tripliquated, color=(0, 0, 255))
@@ -518,13 +565,11 @@ class GrabCut:
         return display_img
 
     @staticmethod
-    def save_mask_display(name: str, grabmask: np.ndarray, output_dir: Path, verbose=True,
+    def save_mask_display(name: str, grabmask: np.ndarray, output_dir: Path, verbose=False,
                           resize_before_save: tuple[int, int] = None, in_thread=True, blank_out_middle_third=False):
 
-        if verbose: print("SAVE A", np.unique(grabmask), grabmask.shape)
         mask_display = GrabCut.grabmask_to_displaymask(grabmask)
-        if verbose: print("SAVE B", np.unique(mask_display), mask_display.shape)
-        if verbose: print("saving to:", str(output_dir / name))
+        if verbose: print("saving mask to:", str(output_dir / name))
         output_dir.mkdir(parents=True, exist_ok=True)
         if resize_before_save is not None:
             mask_display = cv2.resize(mask_display, resize_before_save[::-1])  # -1 for flip height and width (torch=h,w, cv2=w,h)
@@ -539,6 +584,18 @@ class GrabCut:
         else:
             cv2.imwrite(str(output_dir / name), mask_display)
         # return output_dir / name
+
+    @staticmethod
+    def save_time_log(i_frame: int, csv: Path, old_timestamp: float, verbose=True):
+        if not csv.exists():
+            with open(str(csv), 'w') as f:
+                f.write('i_frame,timespent,end_unix,end_day,end_clock\n')
+
+        add_time = time.time() - old_timestamp
+        if verbose: print(f'Frame {i_frame} took {add_time:.2f} seconds. Added to {csv}')
+        with open(str(csv), 'a') as f:
+            today = datetime.datetime.today()
+            f.write(f'{i_frame},{add_time},{time.time()},{today.strftime("%Y-%m-%d")},{today.strftime("%H:%M:%S")}\n')
     @staticmethod
     def get_all_pencil_keys(ALL_PENS):
         all_keys = []
@@ -546,7 +603,7 @@ class GrabCut:
             all_keys += list(pencil['keyboard'])
         return all_keys
 
-    def validate_element(self):
+    def validate_element_in_csv(self):
         self.savemask = GrabCut.add_elmt_to_savemask(self.grabmask, self.savemask, self.nth_elmt_in_img)
         print(f'Saved element "{self.label}" in image "{self.img_name}_lid{self.label_id}.png" (value = 256 - '
               f'{self.nth_elmt_in_img})')
@@ -562,16 +619,19 @@ class GrabCut:
         pd.DataFrame(self.building_csv).to_csv(annotation_csv_path,
                                                header=HEADER_CSV, index=False)
 
+    def get_previous_mask(self, deprecated_behaviour=False):
+        if deprecated_behaviour:
+            # this doesn't work when skipping some frames
+            self.all_corrected_masks = search_for_images(self.output_dir, recursive=True)
+            return GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_corrected_masks, self.i_img_in_folder-1, new_h=self.new_hw[0], new_w=self.new_hw[1])
+        else:
+            img_path = self.output_dir / f"frame_{self.i_img_in_folder-1:06d}_lid1.png"
+            return GrabCut.initial_mask_as_grabmask_from_img_path(self.color_cst, img_path, new_h=self.new_hw[0], new_w=self.new_hw[1])
 
-    def load_previous_mask(self):
-        self.all_corrected_masks = search_for_images(self.output_dir, recursive=True)
-        self.grabmask = GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_corrected_masks, self.i_img_in_folder-1, new_h=self.new_hw[0], new_w=self.new_hw[1])
-
-    def on_press(self, key_event: KeyboardEvent) -> bool | None:
+    def on_press(self, key_event: KeyboardEvent, verbose=False) -> bool | None:
+        from apply_probablify_around_shape import apply_probablify_pen_around_shape
         k_tmp = key_event.name
-        DEBUG = True
-
-        if DEBUG: print(f'{key_event}, Actually typing={self.states.typing_a_label}')
+        if verbose: print(f'{key_event}, Actually typing={self.states.typing_a_label}')
         if self.states.typing_a_label:
             if k_tmp == 'enter':
                 self.states.typing_a_label = False
@@ -581,53 +641,107 @@ class GrabCut:
         if k_tmp in GrabCut.get_all_pencil_keys(self.color_cst.ALL_PENS):
             self.change_pencil(k_tmp)
         elif k_tmp == 's':  # save image
-            self.save_mask_display(f'frame_{self.i_img_in_folder:06d}_lid{self.label_id}.png',self.grabmask, self.output_dir,
+            GrabCut.save_mask_display(f'frame_{self.i_img_in_folder:06d}_lid{self.label_id}.png',self.grabmask, self.output_dir,
                                    resize_before_save=self.save_shape, blank_out_middle_third=self.blank_out_middle_third)
-            print(" Result saved as image \n")
+            GrabCut.save_time_log(self.i_img_in_folder, self.time_log_file, self.timestamp_old)
         elif k_tmp == 'r':  # reset everything
             self.reset()
         elif k_tmp == 'n':  # grabcut-alg iteration
             self.iterate_grabcut()
         elif k_tmp == 'w':  # next element (of the same class, of the same image)
-            self.validate_element()
+            self.validate_element_in_csv()
             self.reset()
         elif k_tmp == 'l':
             self.states.typing_a_label = True
         elif k_tmp == 'a':  # validate annotation for all the images done then quit
             self.validate_annotation()
         elif k_tmp == 'p':  # load previous frame mask
-            self.load_previous_mask()
+            self.grabmask = self.get_previous_mask()
         elif k_tmp == 'o':
             self.grabmask = GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_initial_masks,
                                                              self.i_img_in_folder, new_h=self.new_hw[0], new_w=self.new_hw[1])
+        elif k_tmp == '-' or k_tmp == '+':
+            self.this_img_2bitmodifier += (-7) if k_tmp == '-' else 7
+            print("modifier", self.this_img_2bitmodifier)
+            self.grabmask = GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_initial_masks,
+                                                             self.i_img_in_folder, new_h=self.new_hw[0],
+                                                             new_w=self.new_hw[1], modifier=self.this_img_2bitmodifier)
         elif k_tmp == 'd':
             self.states.pencil['thickness'] = max(1, self.states.pencil['thickness'] - 2)
         elif k_tmp == 'f':
             self.states.pencil['thickness'] = min(100, self.states.pencil['thickness'] + 2)
-        elif k_tmp == 'x':  # next img
-            self.validate_element()
-            if DEBUG: print(f'Unique values of savemask before valid : {np.unique(self.img_display)}')
-            #
-            #  Le array se buildup et des csv se créent de plus en plus long
-            #  Il faudrait que le csv soit créé au lancement du programme avec un timecode + update a chaque "X"
-            #
-            print(f"ALLEZ SAVE {self.img_name}_lid{self.label_id}.png")
-            self.last_corrected_mask = self.save_mask_display(f'frame_{self.i_img_in_folder:06d}_lid{self.label_id}.png',self.grabmask, self.output_dir,
-                                   resize_before_save=self.save_shape, blank_out_middle_third=self.blank_out_middle_third)
-
-            if DEBUG: print(f'Number of element in validated img : {np.unique(self.img_display).size}')
-            # cv2.imwrite(str(cst.ASSETS_DIR / 'masks' / f'{img_name.stem}_{label}{nth_in_img}.png'), savemask)
+        elif k_tmp == 'm':  # probablify a frame
+            self.grabmask = apply_probablify_pen_around_shape(self.grabmask, ksize=9, internal_probablify=True)
+        elif k_tmp == "ù":
+            self.grabmask = apply_probablify_pen_around_shape(self.grabmask, ksize=9, external_probablify=False,
+                                                              internal_probablify=True)
+        elif k_tmp == "*":
+            self.grabmask = apply_probablify_pen_around_shape(self.grabmask, ksize=9, external_probablify=True,
+                                                              internal_probablify=False)
+        elif k_tmp == "ç":  # add O mask on current grabmask
+            from add_two_grabmasks import add_two_grabmasks
+            tmp_grabmask_O = GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_initial_masks,
+                                                             self.i_img_in_folder, new_h=self.new_hw[0], new_w=self.new_hw[1])
+            self.grabmask = add_two_grabmasks(self.grabmask, tmp_grabmask_O)
+        elif k_tmp == "à":  # add P mask on current grabmask
+            from add_two_grabmasks import add_two_grabmasks
+            tmp_grabmask_P = self.get_previous_mask()
+            self.grabmask = add_two_grabmasks(self.grabmask, tmp_grabmask_P)
+        elif k_tmp == 'j' or k_tmp == 'k':  # skip frames (1 for k and 5 for j)
+            self.this_img_2bitmodifier = self.default_2bitmodifier
+            if k_tmp == 'k':
+                self.i_img_in_folder += 1
+            elif k_tmp == 'j':
+                self.i_img_in_folder += 5
             self.nth_elmt_in_img = 1  # because we reset
-            self.i_img_in_folder += 1
-            print()
+            # GrabCut.save_time_log(self.i_img_in_folder, self.time_log_file, self.timestamp_old)
+            self.timestamp_old = time.time()
             if self.i_img_in_folder >= len(self.all_img_paths):
                 self.should_exit_now = True
                 exit()  # Exit this listener thread
             self.img_original, self.img_name, self.img_original_shape, self.new_hw = GrabCut.init_image(self.all_img_paths, self.i_img_in_folder, downsize=self.downsize)
             all_buffers = GrabCut.init_buffers_from_img(self.img_original, self.color_cst)
             self.img_painted, self.savemask, self.grabmask, self.img_display = all_buffers
-            if self.nb_next_frames > 0:
-                self.next_frames = GrabCut.shift_next_frames(self.all_img_paths, self.next_frames, self.i_img_in_folder, self.new_hw[0], self.new_hw[1])
+            if self.nb_next_frames_to_preview > 0:
+                if k_tmp == 'j':
+                    self.next_frames = GrabCut.get_all_next_frames(self.all_img_paths, self.i_img_in_folder,
+                                                                   self.nb_next_frames_to_preview,
+                                                                   self.new_hw[0] * 2 // self.nb_next_frames_to_preview,
+                                                                   self.new_hw[1] * 2 // self.nb_next_frames_to_preview)
+                elif k_tmp == 'k':
+                    self.next_frames = GrabCut.shift_next_frames(self.all_img_paths, self.next_frames, self.i_img_in_folder,
+                                                                 self.new_hw[0] * 2 // self.nb_next_frames_to_preview,
+                                                                 self.new_hw[1] * 2 // self.nb_next_frames_to_preview)
+            if self.init_grabcut_with == "mask":
+                self.grabmask = GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_initial_masks,
+                                                                 self.i_img_in_folder, new_h=self.new_hw[0], new_w=self.new_hw[1])
+        elif k_tmp == 'x':  # next img
+            self.this_img_2bitmodifier = self.default_2bitmodifier
+            self.validate_element_in_csv()
+            if verbose: print(f'Unique values of savemask before valid : {np.unique(self.img_display)}')
+            #
+            #  Le array se buildup et des csv se créent de plus en plus long
+            #  Il faudrait que le csv soit créé au lancement du programme avec un timecode + update a chaque "X"
+            #
+            self.save_mask_display(f'frame_{self.i_img_in_folder:06d}_lid{self.label_id}.png',self.grabmask, self.output_dir,
+                                   resize_before_save=self.save_shape, blank_out_middle_third=self.blank_out_middle_third)
+
+            if verbose: print(f'Number of element in validated img : {np.unique(self.img_display).size}')
+            # cv2.imwrite(str(cst.ASSETS_DIR / 'masks' / f'{img_name.stem}_{label}{nth_in_img}.png'), savemask)
+            self.nth_elmt_in_img = 1  # because we reset
+            GrabCut.save_time_log(self.i_img_in_folder, self.time_log_file, self.timestamp_old)
+            self.i_img_in_folder += 1
+            self.timestamp_old = time.time()
+            if self.i_img_in_folder >= len(self.all_img_paths):
+                self.should_exit_now = True
+                exit()  # Exit this listener thread
+            self.img_original, self.img_name, self.img_original_shape, self.new_hw = GrabCut.init_image(self.all_img_paths, self.i_img_in_folder, downsize=self.downsize)
+            all_buffers = GrabCut.init_buffers_from_img(self.img_original, self.color_cst)
+            self.img_painted, self.savemask, self.grabmask, self.img_display = all_buffers
+            if self.nb_next_frames_to_preview > 0:
+                self.next_frames = GrabCut.shift_next_frames(self.all_img_paths, self.next_frames, self.i_img_in_folder,
+                                                             self.new_hw[0] * 2 // self.nb_next_frames_to_preview,
+                                                             self.new_hw[1] * 2 // self.nb_next_frames_to_preview)
             if self.init_grabcut_with == "mask":
                 self.grabmask = GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_initial_masks,
                                                                  self.i_img_in_folder, new_h=self.new_hw[0], new_w=self.new_hw[1])
@@ -762,19 +876,18 @@ if __name__ == '__main__':
     # framefolder_path = Path("E:/ICE_CUBED_RESULTS/ltrt_mask_BIREF/ROYAUME_0_BIREF")
     # video_to_framefolder(vid_path, framefolder_path)
 
-
     # input_dir = Path("C:/Users/David Traparic/Documents/prog/fast_label/demo_data/DragonBallSuper/images")
     # initial_mask_dir = Path("C:/Users/David Traparic/Documents/prog/fast_label/demo_data/DragonBallSuper/initial_masks")
     # output_dir = Path("C:/Users/David Traparic/Documents/prog/fast_label/demo_data/DragonBallSuper/corrected_masks")
     #
     # begin_at_frame = 0
     # run_grabcut_with_maskfolder(input_dir, output_dir, initial_mask_dir, recursive_img_search=True, downsize=1, begin_at_frame=begin_at_frame)
-    # exit()
-    #
-    run_demo_BDS()
-    exit()
+    # # exit()
+    # # run_demo_BDS()
+    # # exit()
 
-    video = ["Dune_0", "Moana_0", "Dune2_0", "TopGun_0", "Furiosa_0", 'ROYAUME_0']
+    # video = ["Dune_0", "Moana_0", "Dune2_0", "TopGun_0", "Furiosa_0", 'ROYAUME_0']
+    video = ["TopGun_0"]
     for v in video:
         input_dir = Path("E:/ICE_CUBED_RESULTS/frames/" + v)
         suffix = "_BIREFmxt3"
@@ -783,3 +896,6 @@ if __name__ == '__main__':
 
         begin_at_frame = 0
         run_grabcut_with_maskfolder(input_dir, output_dir, initial_mask_dir, recursive_img_search=True, downsize=3, begin_at_frame=begin_at_frame)
+
+# Frames ou on voit la puissance de l'outil : 668 et 689 705 719 1750 2320(usageMN) 2536 (usage MN)
+# Nouvelle feature : additionner O et P
