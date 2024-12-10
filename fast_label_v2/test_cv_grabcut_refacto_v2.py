@@ -74,9 +74,12 @@ def human_sorted(l, backslash_is_a_char=True):
 
     return res
 
-def search_for_images(im_dir: Path, recursive=False) -> [Path]:
+def search_for_images(im_dir: Path, recursive=False, humanly_sort=True) -> [Path]:
     search_method = im_dir.rglob if recursive else im_dir.glob
-    return human_sorted(list(search_method("*.jpg")) + list(search_method("*.png")))
+    if humanly_sort:
+        return human_sorted(list(search_method("*.jpg")) + list(search_method("*.png")))
+    else:
+        raise NotImplementedError
 
 @dataclass
 class ColorConstants:
