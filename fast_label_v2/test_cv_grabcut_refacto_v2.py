@@ -644,6 +644,7 @@ class GrabCut:
               "à | 0: add to this mask the initial_mask[k+1] \n"
               ") | °: add to this mask the initial_mask[k+2] \n"
               "\n"
+              "g: toggle guidelines \n"
               "-: give more confidence to the detected elements in the original mask (can be used multiple times)\n"
               "+: give less confidence to the detected elements in the original mask (can be used multiple times)\n"
               "r s w a l: don't use this ! \n"
