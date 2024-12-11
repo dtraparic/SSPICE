@@ -46,9 +46,10 @@ def remove_lid_from_framefolder(framefolder: Path):
 
 
 if __name__ == '__main__':
-    multiframefolder_path = Path("E:/ICE_CUBED_RESULTS/frames/Dune_0")
-    framefolder_path = Path("E:/DICE Dataset/DICE_VD/im")
+    multiframefolder_path = Path("E:/ICE_CUBED_RESULTS/frames/TopGun_0")
+    Path("E:/DATA fast label retrain biref/images/TopGun_0").mkdir(exist_ok=True)
+    framefolder_path = Path("E:/DATA fast label retrain biref/images/TopGun_0")
     from_multiframefolder_to_framefolder(multiframefolder_path, framefolder_path)
 
-    truc = Path("E:/DICE Dataset/DICE_VD/gt")
-    remove_lid_from_framefolder(truc)
+    # truc = Path("E:/DICE Dataset/DICE_VD/gt")
+    # remove_lid_from_framefolder(truc)

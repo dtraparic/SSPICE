@@ -130,6 +130,7 @@ class GrabCut:
         self.output_dir = output_dir
         self.i_img_in_folder = begin_at_frame
         self.label = "unknown"
+        self.print_manual()
         self.label_id = 1
         self.building_csv = []
         self.nb_next_frames_to_preview = nb_preview_next_frames
@@ -548,10 +549,14 @@ class GrabCut:
         # grabmask_human[np.all(grabmask_human == [2, 2, 2], axis=-1)] = color_cst.ALL_PENS["PR_BG"]["color_bgr"]
         # grabmask_human[np.all(grabmask_human == [3, 3, 3], axis=-1)] = color_cst.ALL_PENS["PR_FG"]["color_bgr"]
         mask_display_tripliquated = np.stack((mask_display,) * 3, axis=-1)
-        if guide_lines:
-            mask_display_tripliquated = GrabCut.add_vertical_lines_at_thirds(mask_display_tripliquated, color=(0, 0, 255))
         if verbose: print("[compute_display_img] bitwise and", img_original.shape, mask_display.shape)
         masked_img = cv2.bitwise_and(img_original, img_original, mask=mask_display)
+
+        if guide_lines:
+            mask_display_tripliquated = GrabCut.add_vertical_lines_at_thirds(mask_display_tripliquated, color=(0, 0, 255))
+            masked_img = GrabCut.add_vertical_lines_at_thirds(masked_img, color=(0, 0, 255))
+            img_painted = GrabCut.add_vertical_lines_at_thirds(img_painted, color=(0, 0, 255))
+            grabmask_human = GrabCut.add_vertical_lines_at_thirds(grabmask_human, color=(0, 0, 255))
 
         if mode == "4x1col":
             display_img = np.vstack((img_painted, grabmask_human, mask_display_tripliquated, masked_img))
@@ -617,19 +622,59 @@ class GrabCut:
         self.nth_elmt_in_img += 1
         # self.reset()
 
+    def print_manual(self):
+        print("h: print this help \n"
+              "1: change brush to sure background \n"
+              "2: change brush to sure foreground \n"
+              "3: change brush to probable background \n"
+              "4: change brush to probable foreground \n"
+              "d: smaller size for this brush \n"
+              "f: bigger size for this brush \n"
+              "x: validate this frame + next frame \n"
+              "\n"
+              "y: reset the mask to corrected_mask[k-2] \n"
+              "u: reset the mask to corrected_mask[k-1] (previous frame)\n"
+              "i: reset the mask to initial_mask[k] (actual frame)\n"
+              "o: reset the mask to initial_mask[k+1] (next frame)\n"
+              "p: reset the mask to initial_mask[k+2] \n"
+              "\n"
+              "è | 7: add to this mask the corrected_mask[k-2] \n"
+              "_ | 8: add to this mask the corrected_mask[k-1] \n"
+              "ç | 9: add to this mask the initial_mask[k] \n"
+              "à | 0: add to this mask the initial_mask[k+1] \n"
+              ") | °: add to this mask the initial_mask[k+2] \n"
+              "\n"
+              "-: give more confidence to the detected elements in the original mask (can be used multiple times)\n"
+              "+: give less confidence to the detected elements in the original mask (can be used multiple times)\n"
+              "r s w a l: don't use this ! \n"
+              "\n"
+              "m: add incertity around the contours lines (external and internal) \n"
+              "ù: add incertity around the contours lines (internal only) \n"
+              "*: add incertity around the contours lines (external only) \n"
+              "n: iterate grabcut (optional) \n")
+        pass
     def validate_annotation(self, annotation_csv_path: Path):
         HEADER_CSV = ['img_name', 'value_in_mask', 'label', 'label_id']
         pd.DataFrame(self.building_csv).to_csv(annotation_csv_path,
                                                header=HEADER_CSV, index=False)
 
-    def get_previous_mask(self, deprecated_behaviour=False):
-        if deprecated_behaviour:
-            # this doesn't work when skipping some frames
-            self.all_corrected_masks = search_for_images(self.output_dir, recursive=True)
-            return GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_corrected_masks, self.i_img_in_folder-1, new_h=self.new_hw[0], new_w=self.new_hw[1])
+    def get_existing_mask(self, from_mask: Literal["corrected", "initial"],  offset=-1, verbose=False):
+        if from_mask == "corrected":
+            img_path = self.output_dir / f"frame_{self.i_img_in_folder+offset:06d}_lid1.png"
+            grabmask = GrabCut.initial_mask_as_grabmask_from_img_path(self.color_cst, img_path, new_h=self.new_hw[0], new_w=self.new_hw[1])
+            return grabmask
+        elif from_mask == "initial":
+            # img_path = self.initial_mask_dir / f"frame_{self.i_img_in_folder+offset:06d}.png"
+            img_paths = search_for_images(self.initial_mask_dir, recursive=True)
+            img_path = img_paths[self.i_img_in_folder+offset]
+            grabmask = GrabCut.initial_mask_as_grabmask_from_img_path(self.color_cst, img_path, new_h=self.new_hw[0], new_w=self.new_hw[1])
+            return grabmask
         else:
-            img_path = self.output_dir / f"frame_{self.i_img_in_folder-1:06d}_lid1.png"
-            return GrabCut.initial_mask_as_grabmask_from_img_path(self.color_cst, img_path, new_h=self.new_hw[0], new_w=self.new_hw[1])
+            raise ValueError(f"from_mask must be 'corrected' or 'initial', not {from_mask}")
+
+    # def get_previous_mask(self):
+    #     img_path = self.output_dir / f"frame_{self.i_img_in_folder-1:06d}_lid1.png"
+    #     return GrabCut.initial_mask_as_grabmask_from_img_path(self.color_cst, img_path, new_h=self.new_hw[0], new_w=self.new_hw[1])
 
     def on_press(self, key_event: KeyboardEvent, verbose=False) -> bool | None:
         from apply_probablify_around_shape import apply_probablify_pen_around_shape
@@ -658,11 +703,23 @@ class GrabCut:
             self.states.typing_a_label = True
         elif k_tmp == 'a':  # validate annotation for all the images done then quit
             self.validate_annotation()
-        elif k_tmp == 'p':  # load previous frame mask
-            self.grabmask = self.get_previous_mask()
-        elif k_tmp == 'o':
-            self.grabmask = GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_initial_masks,
-                                                             self.i_img_in_folder, new_h=self.new_hw[0], new_w=self.new_hw[1])
+        elif k_tmp in ['y', 'u', 'i', 'o', 'p']:
+            pos = ['y', 'u', 'i', 'o', 'p'].index(k_tmp) - 2  # 2 being the middle
+            pick_from = "initial" if pos >= 0 else "corrected"
+            print(f"[key {k_tmp}]: Resetting to {pick_from}_mask[k-{pos}] (k being the actual mask)")
+            self.grabmask = self.get_existing_mask(pick_from, offset=pos)
+        elif k_tmp in ['è', '_', 'ç', 'à', ')']:
+            pos = ['è', '_', 'ç', 'à', ')'].index(k_tmp) - 2  # 2 being the middle
+            pick_from = "initial" if pos >= 0 else "corrected"
+            print(f"[key {k_tmp}]: adding to current mask {pick_from}_mask[k-{pos}] (k being the actual mask)")
+            tmp_grabmask_O = self.get_existing_mask(pick_from, offset=pos)
+            from add_two_grabmasks import add_two_grabmasks
+            self.grabmask = add_two_grabmasks(self.grabmask, tmp_grabmask_O)
+
+        elif k_tmp == 'g':  # toggle guide lines
+            self.guide_lines = not self.guide_lines
+        elif k_tmp == 'h':
+            self.print_manual()
         elif k_tmp == '-' or k_tmp == '+':
             self.this_img_2bitmodifier += (-7) if k_tmp == '-' else 7
             print("modifier", self.this_img_2bitmodifier)
@@ -681,15 +738,14 @@ class GrabCut:
         elif k_tmp == "*":
             self.grabmask = apply_probablify_pen_around_shape(self.grabmask, ksize=9, external_probablify=True,
                                                               internal_probablify=False)
-        elif k_tmp == "ç":  # add O mask on current grabmask
-            from add_two_grabmasks import add_two_grabmasks
-            tmp_grabmask_O = GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_initial_masks,
-                                                             self.i_img_in_folder, new_h=self.new_hw[0], new_w=self.new_hw[1])
-            self.grabmask = add_two_grabmasks(self.grabmask, tmp_grabmask_O)
-        elif k_tmp == "à":  # add P mask on current grabmask
-            from add_two_grabmasks import add_two_grabmasks
-            tmp_grabmask_P = self.get_previous_mask()
-            self.grabmask = add_two_grabmasks(self.grabmask, tmp_grabmask_P)
+        # elif k_tmp == "ç":  # add O mask on current grabmask
+        #     tmp_grabmask_O = GrabCut.initial_mask_as_grabmask(self.color_cst, self.all_initial_masks,
+        #                                                      self.i_img_in_folder, new_h=self.new_hw[0], new_w=self.new_hw[1])
+        #     self.grabmask = add_two_grabmasks(self.grabmask, tmp_grabmask_O)
+        # elif k_tmp == "à":  # add P mask on current grabmask
+        #     from add_two_grabmasks import add_two_grabmasks
+        #     tmp_grabmask_P = self.get_previous_mask()
+        #     self.grabmask = add_two_grabmasks(self.grabmask, tmp_grabmask_P)
         elif k_tmp == 'j' or k_tmp == 'k':  # skip frames (1 for k and 5 for j)
             self.this_img_2bitmodifier = self.default_2bitmodifier
             if k_tmp == 'k':
@@ -893,8 +949,8 @@ if __name__ == '__main__':
     video = ["TopGun_0"]
     for v in video:
         input_dir = Path("E:/ICE_CUBED_RESULTS/frames/" + v)
-        suffix = "_BIREFmxt3"
-        initial_mask_dir = Path(f"E:/ICE_CUBED_RESULTS/ltrt_maskfilttemp_BIREF/{v}{suffix}")
+        suffix = "_BIREF"
+        initial_mask_dir = Path(f"E:/DATA fast label retrain biref/initial_masks/{v}{suffix}")
         output_dir = Path(f"E:/DATA fast label retrain biref/corrected_masks/{v}{suffix}")
 
         begin_at_frame = 0

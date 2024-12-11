@@ -146,7 +146,7 @@ if __name__ == '__main__':
     df = pd.concat([df_v0, df_v1], ignore_index=True)
     group_by_iframe(df=df)
     show_stats(df, of_day="all")
-    show_stats(df, of_day="today")
+    show_stats(df, of_day="2024-12-04")
     show_frames_done_per_day(df)
 
 
